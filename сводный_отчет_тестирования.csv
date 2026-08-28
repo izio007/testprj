@@ -1,2 +1,12 @@
 Идентификатор Сценария;Путь к Файлу;Статус Прохождения;Результат
+test_0001_uav_traverse;./catalog/test_0001_uav_traverse.toml;УСПЕХ;Доработано верно
+test_0002_fighter_fast;./catalog/test_0002_fighter_fast.toml;УСПЕХ;Доработано верно
+test_0003_orbit_stability;./catalog/test_0003_orbit_stability.toml;УСПЕХ;Доработано верно
+test_0004_silent_target;./catalog/test_0004_silent_target.toml;УСПЕХ;Доработано верно
+test_0005_distant_traverse;./catalog/test_0005_distant_traverse.toml;УСПЕХ;Доработано верно
+test_0006_noise_stress;./catalog/test_0006_noise_stress.toml;УСПЕХ;Доработано верно
+test_0007_flank_orbit;./catalog/test_0007_flank_orbit.toml;УСПЕХ;Доработано верно
+test_0008_false_init_prevent;./catalog/test_0008_false_init_prevent.toml;УСПЕХ;Доработано верно
+test_0009_high_altitude;./catalog/test_0009_high_altitude.toml;УСПЕХ;Доработано верно
+test_0010_high_frequency;./catalog/test_0010_high_frequency.toml;УСПЕХ;Доработано верно
 тест_налет_0047;./catalog/тест_налет_0047.toml;УСПЕХ;Доработано верно

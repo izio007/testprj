@@ -10,7 +10,7 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-/* Вспомогательный генератор шума Гаусса с фиксированным seed (п. 3 AI.md) */
+/* Простой генератор шума Гаусса */
 static double generate_gauss_noise(double sigma) {
     double u1 = (double)rand() / RAND_MAX;
     double u2 = (double)rand() / RAND_MAX;
@@ -18,25 +18,20 @@ static double generate_gauss_noise(double sigma) {
     return sigma * sqrt(-2.0 * log(u1)) * cos(2.0 * M_PI * u2);
 }
 
-/* Вычислитель положения цели на маршруте барражирования по путевым точкам */
-static void update_object_kinematics(SimObject* obj, double dt) {
+/* Модельный вычислитель кинематики по путевым точкам */
+static void update_object_kinematics(SimObject* obj, double dt, bool* is_target_stopped) {
     if (strcmp(obj->movement_mode, "СТАТИКА") == 0 || obj->waypoint_count < 2) {
         obj->vel_current = (Vector3D){0.0, 0.0, 0.0};
+        *is_target_stopped = true;
         return;
     }
-
     size_t curr_idx = obj->current_waypoint_index;
     size_t next_idx = curr_idx + 1;
 
     if (next_idx >= obj->waypoint_count) {
-        if (obj->is_route_looped) {
-            next_idx = 0;
-        } else {
-            obj->vel_current = (Vector3D){0.0, 0.0, 0.0};
-            return;
-        }
+        if (obj->is_route_looped) next_idx = 0;
+        else { obj->vel_current = (Vector3D){0.0, 0.0, 0.0}; *is_target_stopped = true; return; }
     }
-
     Waypoint* p_curr = &obj->route[curr_idx];
     Waypoint* p_next = &obj->route[next_idx];
 
@@ -45,10 +40,7 @@ static void update_object_kinematics(SimObject* obj, double dt) {
     double dz = p_next->pos.z - obj->pos_current.z;
     double dist_to_next = sqrt(dx*dx + dy*dy + dz*dz);
 
-    if (dist_to_next < 10.0) {
-        obj->current_waypoint_index = next_idx;
-        return;
-    }
+    if (dist_to_next < 10.0) { obj->current_waypoint_index = next_idx; return; }
 
     obj->vel_current.x = (dx / dist_to_next) * p_curr->speed_ms;
     obj->vel_current.y = (dy / dist_to_next) * p_curr->speed_ms;
@@ -57,87 +49,75 @@ static void update_object_kinematics(SimObject* obj, double dt) {
     obj->pos_current.x += obj->vel_current.x * dt;
     obj->pos_current.y += obj->vel_current.y * dt;
     obj->pos_current.z += obj->vel_current.z * dt;
+    *is_target_stopped = false;
 }
 
-/* Главный управляющий конвейер ядра симулятора */
+/* Исполнительный конвейер, пишущий лог строго по вашему текстовому шаблону */
 int run_simulator_loop(TestScenarioContext* ctx, TuningBuffer* buffer_OZU) {
-    printf("[SIM CORE] Initializing pipeline for scenario: %s\n", ctx->scenario_id);
+    const char* log_filename = "./полный_протокол_валидации.txt";
+    FILE* log_fp = fopen(log_filename, "a");
+
+    if (!log_fp) {
+        return 1;
+    }
+
+    // Логирование шапки запуска строго по эталону Пользователя
+    fprintf(log_fp, "[SIM CORE] Running simulation: %s (dt = %.2f)\n", ctx->scenario_id, ctx->time_step);
 
     srand(ctx->random_seed);
     double t = 0.0;
     bool stop_required = false;
+    char stop_reason_str[MAX_STR_LEN * 2] = {0};
 
     SimObject* radar = &ctx->objects[0];
     SimObject* target = &ctx->objects[1];
-
     int saved_track_id = -1;
     bool checkpoint_triggered[MAX_WAYPOINTS];
 
-    /* Принудительный сброс массива триггеров */
-    for (size_t i = 0; i < MAX_WAYPOINTS; i++) {
-        checkpoint_triggered[i] = false;
-    }
-
-    /* Инициализация статусов чекпоинтов в контексте */
+    for (size_t i = 0; i < MAX_WAYPOINTS; i++) checkpoint_triggered[i] = false;
     for (size_t i = 0; i < ctx->checkpoint_count; i++) {
         ctx->checkpoints[i].is_passed = false;
-        strncpy(ctx->checkpoints[i].actual_status_str, "НЕ ДОСТИГНУТ", MAX_STR_LEN - 1);
-        ctx->checkpoints[i].actual_status_str[MAX_STR_LEN - 1] = '\0';
+        strcpy(ctx->checkpoints[i].actual_status_str, "НЕ ДОСТИГНУТ");
     }
 
     while (!stop_required) {
         t += ctx->time_step;
+        bool is_target_stopped = false;
+        bool is_radar_stopped = false;
+        update_object_kinematics(target, ctx->time_step, &is_target_stopped);
+        update_object_kinematics(radar, ctx->time_step, &is_radar_stopped);
 
-        /* [Шаг 1: Геометрия] */
-        update_object_kinematics(target, ctx->time_step);
-        update_object_kinematics(radar, ctx->time_step);
+        if (is_target_stopped && !target->is_route_looped) {
+            strcpy(stop_reason_str, "[SIM CORE] Моделирование завершено: цель выполнила весь маршрут точек.");
+            break;
+        }
 
-        /* [Шаг 2: Фильтры] */
         double dx = target->pos_current.x - radar->pos_current.x;
         double dy = target->pos_current.y - radar->pos_current.y;
         double dist = sqrt(dx*dx + dy*dy);
-
         double true_az = atan2(dy, dx);
         double cos_angle = fabs(target->pos_current.y / dist);
         bool is_alignment_zone = (cos_angle < sin(2.0 * M_PI / 180.0));
 
-        RadarMeasurement measurement;
-        measurement.time = t;
-        measurement.radar_id = radar->id;
-        measurement.measured_el = 0.0;
+        RadarMeasurement measurement = { .time = t, .radar_id = radar->id, .measured_el = 0.0 };
+        if (is_alignment_zone) { measurement.is_valid = false; measurement.measured_az = 0.0; }
+        else { measurement.is_valid = true; measurement.measured_az = true_az + generate_gauss_noise(0.002); }
 
-        if (is_alignment_zone) {
-            measurement.is_valid = false;
-            measurement.measured_az = 0.0;
-        } else {
-            measurement.is_valid = true;
-            measurement.measured_az = true_az + generate_gauss_noise(0.002);
-        }
-
-        /* [Шаг 3: Математика] */
         OutputTrackState current_track = { .track_id = -1, .status = TRACK_FREE };
         track_engine_process_measurement(&measurement, target->type, buffer_OZU, &current_track);
 
-        if (current_track.status == TRACK_CONFIRMED && saved_track_id == -1) {
-            saved_track_id = current_track.track_id;
-        }
+        if (current_track.status == TRACK_CONFIRMED && saved_track_id == -1) saved_track_id = current_track.track_id;
 
-        /* [Шаг 4: Анализ] — Хронологическая проверка условий на чекпоинтах по временному створу такта */
         for (size_t i = 0; i < ctx->checkpoint_count; i++) {
             CheckpointConfig* cp = &ctx->checkpoints[i];
-            
             if (!checkpoint_triggered[i] && (t >= cp->check_time) && (t < (cp->check_time + ctx->time_step))) {
-
                 TrackStatus expected_status = TRACK_FREE;
                 if (strcmp(cp->expected_status_str, "TRACK_INIT") == 0) expected_status = TRACK_INIT;
                 else if (strcmp(cp->expected_status_str, "TRACK_CONFIRMED") == 0) expected_status = TRACK_CONFIRMED;
                 else if (strcmp(cp->expected_status_str, "TRACK_EXTRAPOLATED") == 0) expected_status = TRACK_EXTRAPOLATED;
                 else if (strcmp(cp->expected_status_str, "TRACK_RESTORED") == 0) expected_status = TRACK_RESTORED;
 
-                bool status_ok = (current_track.status == expected_status);
-                bool id_ok = (!cp->check_id_preservation || (current_track.track_id == saved_track_id));
-
-                cp->is_passed = (status_ok && id_ok);
+                cp->is_passed = ((current_track.status == expected_status) && (!cp->check_id_preservation || current_track.track_id == saved_track_id));
 
                 const char* status_ru = "НЕИЗВЕСТНО";
                 switch (current_track.status) {
@@ -147,46 +127,36 @@ int run_simulator_loop(TestScenarioContext* ctx, TuningBuffer* buffer_OZU) {
                     case TRACK_EXTRAPOLATED: status_ru = "ЭКСТРАПОЛЯЦИЯ (АРХИВ)"; break;
                     case TRACK_RESTORED:     status_ru = "ВОССТАНОВЛЕНА"; break;
                 }
-
                 strncpy(cp->actual_status_str, status_ru, MAX_STR_LEN - 1);
-                cp->actual_status_str[MAX_STR_LEN - 1] = '\0';
-
                 checkpoint_triggered[i] = true;
             }
         }
 
-        /* КРИТЕРИЙ ОСТАНОВА */
-        if (strcmp(ctx->stop_condition_type, "ВЫХОД_ИЗ_СТВОРА") == 0) {
-            if (target->pos_current.y > ctx->stop_max_distance_after) {
-                stop_required = true;
-            }
+        if (strcmp(ctx->stop_condition_type, "ВЫХОД_ИЗ_СТВОРА") == 0 && target->pos_current.y > ctx->stop_max_distance_after) {
+            sprintf(stop_reason_str, "[SIM CORE] Останов по условию аналитика: ВЫХОД_ИЗ_СТВОРА (Y > %.1f м)", ctx->stop_max_distance_after);
+            stop_required = true;
         }
-        if (t >= ctx->stop_max_time) {
+        if (ctx->stop_max_time > 0.0 && (t >= ctx->stop_max_time - 1e-5)) {
+            sprintf(stop_reason_str, "[SIM CORE] Останов по условию аналитика: МАКС_ВРЕМЯ (t >= %.1f сек)", ctx->stop_max_time);
             stop_required = true;
         }
     }
 
-    /* ФОРМИРОВАНИЕ СУДЕЙСКОГО ОТЧЕТА В КОНСОЛЬ ДЛЯ АНАЛИТИКА */
-    printf("\n=======================================================================\n");
-    printf("ПРОТОКОЛ ВЕРИФИКАЦИИ УСЛОВИЙ ДЛЯ СЦЕНАРИЯ: %s\n", ctx->scenario_id);
-    printf("=======================================================================\n");
-
+    // Расчет финального вердикта
     bool final_success = true;
     for (size_t i = 0; i < ctx->checkpoint_count; i++) {
-        CheckpointConfig* cp = &ctx->checkpoints[i];
-
-        printf("Точка N%zu [%.1f сек] | Суть: %s\n", i + 1, cp->check_time, cp->comment);
-        printf("  -> Ожидалось:  %s\n", cp->expected_status_str);
-        printf("  -> Фактически: %s\n", cp->actual_status_str);
-
-        if (cp->is_passed) {
-            printf("  -> Вердикт точки:  [ОТРАБОТАНО ВЕРНО]\n");
-        } else {
-            printf("  -> Вердикт точки: ❌ [НАРУШЕНО]\n");
-            final_success = false;
-        }
-        printf("-----------------------------------------------------------------------\n");
+        if (!ctx->checkpoints[i].is_passed) { final_success = false; break; }
     }
 
+    // Запись строго по вашему текстовому шаблону
+    fprintf(log_fp, "%s\n", stop_reason_str);
+    fprintf(log_fp, "ПРОТОКОЛ ВЕРИФИКАЦИИ УСЛОВИЙ ДЛЯ СЦЕНАРИЯ: %s\n", ctx->scenario_id);
+    if (final_success) {
+        fprintf(log_fp, "✅ [TEST PASSED STATUS: SUCCESS]\n");
+    } else {
+        fprintf(log_fp, "❌ [TEST FAILED STATUS: REJECTED]\n");
+    }
+
+    fclose(log_fp);
     return final_success ? 0 : 1;
 }
